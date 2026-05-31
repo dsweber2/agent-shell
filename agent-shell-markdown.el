@@ -206,7 +206,9 @@ For example:
     (agent-shell-markdown-replace-markup)
     (buffer-string)))
 
-(cl-defun agent-shell-markdown-replace-markup (&key force)
+(cl-defun agent-shell-markdown-replace-markup (&key force
+                                                    (render-images t)
+                                                    (highlight-blocks t))
   "Replace Markdown markup in current buffer with propertized text.
 
 Rewrites the buffer in place: markup characters are removed and
@@ -233,7 +235,15 @@ instead of `point-min'.  The watermark is read off the
 `agent-shell-markdown-watermark' text property on the first
 character and re-stamped at the end of the call.  Pass FORCE
 non-nil to drop the watermark and re-render the whole buffer
-(useful after mid-buffer edits, or for tests)."
+(useful after mid-buffer edits, or for tests).
+
+RENDER-IMAGES, when non-nil (the default), replaces `![alt](url)'
+markup with displayed images where the URL resolves to an image
+file; nil leaves the markup as-is.  HIGHLIGHT-BLOCKS, when non-nil
+(the default), runs the fenced-block body through the language's
+major-mode font-lock to colour keywords / strings / etc.; nil
+strips the fences and inserts the action label but leaves the
+body un-fontified."
   (save-excursion
     (when force
       (with-silent-modifications
@@ -263,11 +273,14 @@ non-nil to drop the watermark and re-render the whole buffer
           (agent-shell-markdown--replace-headers :avoid-ranges avoid-ranges)
           (agent-shell-markdown--style-inline-code :avoid-ranges source-ranges)
           (agent-shell-markdown--replace-links :avoid-ranges avoid-ranges)
-          (agent-shell-markdown--replace-images :avoid-ranges avoid-ranges)
-          (agent-shell-markdown--replace-image-file-paths :avoid-ranges avoid-ranges)
+          (when render-images
+            (agent-shell-markdown--replace-images :avoid-ranges avoid-ranges)
+            (agent-shell-markdown--replace-image-file-paths
+             :avoid-ranges avoid-ranges))
           (agent-shell-markdown--style-dividers :avoid-ranges avoid-ranges)
           (agent-shell-markdown--style-blockquotes :avoid-ranges avoid-ranges)
-          (agent-shell-markdown--style-source-blocks)
+          (agent-shell-markdown--style-source-blocks
+           :highlight-blocks highlight-blocks)
           ;; Tables run last so cell content has already been processed by
           ;; every other pass (bold, italic, links, inline code, etc.).
           ;; The cell parser respects face and `agent-shell-markdown-frozen'
@@ -726,7 +739,7 @@ characters when no usable window is available (e.g. batch)."
   (or (ignore-errors (window-body-width))
       80))
 
-(defun agent-shell-markdown--style-source-blocks ()
+(cl-defun agent-shell-markdown--style-source-blocks (&key (highlight-blocks t))
   "Strip fenced code block markup and syntax-highlight the body.
 
 For each complete `\\`\\`\\`LANG' / `\\`\\`\\`' fenced block,
@@ -739,6 +752,11 @@ re-processed as inline markup even though its surrounding
 fences are gone.
 
 Open / streaming fences (no closing line yet) are left alone.
+
+When HIGHLIGHT-BLOCKS is nil, fences are still stripped and the
+action label inserted, but the body is left un-fontified (no
+language-mode keyword colours).  Useful when the caller wants the
+panel layout without paying the syntax-highlighting cost.
 
 For example, the buffer:
 
@@ -780,9 +798,10 @@ with `emacs-lisp-mode' face properties on the body and a
              (body-end (copy-marker (match-end 4)))
              (close-start (match-beginning 5))
              (close-end (match-end 5))
-             (highlighted (agent-shell-markdown--highlight-code
-                           (buffer-substring-no-properties body-start body-end)
-                           lang)))
+             (highlighted (when highlight-blocks
+                            (agent-shell-markdown--highlight-code
+                             (buffer-substring-no-properties body-start body-end)
+                             lang))))
         ;; Delete in reverse position order so earlier offsets stay
         ;; valid; body markers adjust automatically.
         (delete-region close-start close-end)
