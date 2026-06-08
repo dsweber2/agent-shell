@@ -37,6 +37,11 @@
 (require 'subr-x)
 (require 'text-property-search)
 
+(defvar agent-shell-ui-post-expand-fragment-at-point-hook nil
+  "Hook run after expanding a fragment at point.
+When run, the buffer is narrowed to the body region and
+`inhibit-read-only' is in effect.")
+
 (cl-defun agent-shell-ui-make-fragment-model (&key (namespace-id "global") (block-id "1") label-left label-right body)
   "Create a fragment model alist.
 NAMESPACE-ID, BLOCK-ID, LABEL-LEFT, LABEL-RIGHT, and BODY are the keys."
@@ -703,7 +708,11 @@ When NO-UNDO is non-nil, disable undo recording."
                              (point) indicator-properties)
         (map-put! state :collapsed new-collapsed-state)
         (put-text-property (map-elt block :start)
-                           (map-elt block :end) 'agent-shell-ui-state state)))))
+                           (map-elt block :end) 'agent-shell-ui-state state)
+        (unless new-collapsed-state
+          (save-restriction
+            (narrow-to-region (map-elt body :start) (map-elt body :end))
+            (run-hooks 'agent-shell-ui-post-expand-fragment-at-point-hook)))))))
 
 (defun agent-shell-ui-collapse-fragment-by-id (namespace-id block-id)
   "Collapse fragment with NAMESPACE-ID and BLOCK-ID."

@@ -3073,6 +3073,8 @@ variable (see makunbound)"))
       (add-hook 'kill-buffer-hook #'agent-shell--clean-up nil t)
       (add-hook 'change-major-mode-hook #'agent-shell--clean-up nil t)
       (agent-shell-ui-mode +1)
+      (add-hook 'agent-shell-ui-post-expand-fragment-at-point-hook
+                #'agent-shell--render-markdown nil t)
       (when agent-shell-file-completion-enabled
         (agent-shell-completion-mode +1))
       (agent-shell--setup-modeline)
@@ -3276,7 +3278,11 @@ turn)."
               (when-let* ((body-start (map-nested-elt range '(:body :start)))
                           (body-end (map-nested-elt range '(:body :end))))
                 (narrow-to-region body-start body-end)
-                (agent-shell--render-markdown :render-images render-body-images)))
+                ;; Skip rendering when body is collapsed; it will be
+                ;; rendered on expand via
+                ;; `agent-shell-ui-post-expand-fragment-at-point-hook'.
+                (unless (text-property-any (point-min) (point-max) 'invisible t)
+                  (agent-shell--render-markdown :render-images render-body-images))))
             ;; Note: For now, we're skipping applying markdown
             ;; on left labels as they currently carry propertized text
             ;; for statuses (ie. boxed).
@@ -3356,7 +3362,11 @@ turn)."
              (when-let* ((body-start (map-nested-elt range '(:body :start)))
                          (body-end (map-nested-elt range '(:body :end))))
                (narrow-to-region body-start body-end)
-               (agent-shell--render-markdown)
+               ;; Skip rendering when body is collapsed; it will be
+               ;; rendered on expand via
+               ;; `agent-shell-ui-post-expand-fragment-at-point-hook'.
+               (unless (text-property-any (point-min) (point-max) 'invisible t)
+                 (agent-shell--render-markdown))
                (widen))
              ;;
              ;; Note: For now, we're skipping applying markdown
