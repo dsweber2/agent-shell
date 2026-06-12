@@ -27,13 +27,17 @@
 ;; through the `letta-code-acp' adapter, which wraps
 ;; `letta -p --output-format stream-json'.
 ;;
-;; Letta-specific notes:
+;; A Letta agent has a persistent "main chat" conversation plus any
+;; number of side conversations.  `agent-shell-letta-start-main-chat'
+;; attaches to the former; `agent-shell-letta-start-conversation'
+;; spawns a fresh one.
 ;;
-;; - A Letta agent has a persistent "main chat" conversation plus any
-;;   number of side conversations.  `agent-shell-letta-start-main-chat'
-;;   attaches to the former; `agent-shell-letta-start-conversation'
-;;   spawns a fresh one.
-;; - Set `agent-shell-letta-agent-id' to pin shells to a specific agent.
+;; The adapter is configured through environment variables set via
+;; `agent-shell-letta-environment', for example:
+;;
+;;   LETTA_API_KEY=...         Letta Cloud credentials.
+;;   LETTA_AGENT_ID=agent-...  Pin shells to a specific agent.
+;;   LETTA_MODEL=auto          Model handle.
 ;;
 
 ;;; Code:
@@ -63,57 +67,16 @@ The first element is the command name, and the rest are command parameters."
 
 This should be a list of \"NAME=VALUE\" strings, typically built with
 `agent-shell-make-environment-variables'.  Use it to inject
-LETTA_API_KEY for Letta Cloud, or leave credentials to the adapter's
-own environment for local backends."
+LETTA_API_KEY for Letta Cloud, LETTA_AGENT_ID to pin shells to a
+specific agent, or LETTA_MODEL to select a model."
   :type '(repeat string)
   :group 'agent-shell)
 
-(defcustom agent-shell-letta-agent-id
-  nil
-  "Optional Letta agent ID to pin shell sessions to.
+(defvar agent-shell-letta--conversation-id nil
+  "Letta conversation the next shell session attaches to.
 
-When nil, the adapter lets `letta' pick an agent (resume last, or
-create a new one)."
-  :type '(choice (const :tag "Let adapter choose" nil)
-                 (string :tag "Agent ID"))
-  :group 'agent-shell)
-
-(defcustom agent-shell-letta-model
-  nil
-  "Optional Letta model handle (e.g. \"auto\")."
-  :type '(choice (const :tag "Default" nil)
-                 (string :tag "Model handle"))
-  :group 'agent-shell)
-
-(defcustom agent-shell-letta-permission-mode
-  nil
-  "Optional Letta permission mode.
-
-When non-nil, passed to the adapter via the LETTA_PERMISSION_MODE
-environment variable so the spawned `letta -p' uses it."
-  :type '(choice (const :tag "Letta default (unrestricted)" nil)
-                 (const "standard")
-                 (const "acceptEdits")
-                 (const "unrestricted")
-                 (const "memory"))
-  :group 'agent-shell)
-
-(defcustom agent-shell-letta-conversation-id
-  nil
-  "Default Letta conversation to attach to on session start.
-
-Set to an explicit \"conv-...\" id to resume that conversation
-\(in which case `agent-shell-letta-agent-id' is ignored; headless
-derives the agent from the conversation).  Set to \"default\" to
-attach to the agent's main chat.
-
-When nil (the default), the start command decides: the agent's main
-chat via `agent-shell-letta-start-main-chat' or a fresh conversation
-via `agent-shell-letta-start-conversation'."
-  :type '(choice (const :tag "Honor the start command (default)" nil)
-                 (const :tag "Agent's main chat" "default")
-                 (string :tag "Explicit conversation id"))
-  :group 'agent-shell)
+\"default\" attaches to the agent's main chat.  nil spawns a fresh
+conversation.  Bound by the start commands; not user-facing.")
 
 (defun agent-shell-letta-make-agent-config ()
   "Create a Letta Code agent configuration.
@@ -142,22 +105,21 @@ e.g. '(\"node\" \"/path/to/letta-code-acp/dist/cli.js\")."))
 (defun agent-shell-letta-start-main-chat ()
   "Start a Letta Code agent shell attached to the agent's main chat.
 
-The main chat is the persistent top-level conversation for the pinned
-agent (`agent-shell-letta-agent-id').  Shells opened with this command
-attach to the same conversation and share its memory."
+The main chat is the persistent top-level conversation of the Letta
+agent.  Shells opened with this command attach to the same
+conversation and share its memory."
   (interactive)
-  (let ((agent-shell-letta-conversation-id "default"))
+  (let ((agent-shell-letta--conversation-id "default"))
     (agent-shell--dwim :config (agent-shell-letta-make-agent-config)
                        :new-shell t)))
 
 (defun agent-shell-letta-start-conversation ()
   "Start a Letta Code agent shell in a fresh conversation.
 
-Spawns a new conversation under the pinned agent
-\(`agent-shell-letta-agent-id'), separate from the agent's main chat
-and from any other shell."
+Spawns a new conversation, separate from the agent's main chat and
+from any other shell."
   (interactive)
-  (let ((agent-shell-letta-conversation-id nil))
+  (let ((agent-shell-letta--conversation-id nil))
     (agent-shell--dwim :config (agent-shell-letta-make-agent-config)
                        :new-shell t)))
 
@@ -166,17 +128,8 @@ and from any other shell."
   (unless buffer
     (error "Missing required argument: :buffer"))
   (let ((environment (copy-sequence (or agent-shell-letta-environment (list)))))
-    (when agent-shell-letta-agent-id
-      (push (format "LETTA_AGENT_ID=%s" agent-shell-letta-agent-id)
-            environment))
-    (when agent-shell-letta-model
-      (push (format "LETTA_MODEL=%s" agent-shell-letta-model)
-            environment))
-    (when agent-shell-letta-permission-mode
-      (push (format "LETTA_PERMISSION_MODE=%s" agent-shell-letta-permission-mode)
-            environment))
-    (when agent-shell-letta-conversation-id
-      (push (format "LETTA_CONVERSATION_ID=%s" agent-shell-letta-conversation-id)
+    (when agent-shell-letta--conversation-id
+      (push (format "LETTA_CONVERSATION_ID=%s" agent-shell-letta--conversation-id)
             environment))
     (agent-shell--make-acp-client :command (car agent-shell-letta-acp-command)
                                   :command-params (cdr agent-shell-letta-acp-command)
