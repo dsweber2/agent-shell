@@ -3190,15 +3190,23 @@ variable (see makunbound)"))
                                       :buffer shell-buffer
                                       :heartbeat (agent-shell-heartbeat-make
                                                   :on-heartbeat
-                                                  (lambda (_heartbeat _status)
-                                                    (when (get-buffer-window shell-buffer)
+                                                  (lambda (_heartbeat status)
+                                                    ;; 'ended is the final tick; render
+                                                    ;; even if off-screen ensures hidden.
+                                                    (when (or (eq status 'ended)
+                                                              (get-buffer-window shell-buffer t))
                                                       (with-current-buffer shell-buffer
                                                         (agent-shell--update-header-and-mode-line)))
+                                                    ;; 'ended is the final tick; render even
+                                                    ;; if off-screen to ensure animation is hidden.
                                                     (when-let* ((using-viewports agent-shell-prefer-viewport-interaction)
                                                                 (viewport-buffer (agent-shell-viewport--buffer
                                                                                   :shell-buffer shell-buffer
                                                                                   :existing-only t))
-                                                                ((get-buffer-window viewport-buffer)))
+                                                                ;; 'ended is the final tick; render even
+                                                                ;; if off-screen to ensure animation is hidden.
+                                                                ((or (eq status 'ended)
+                                                                     (get-buffer-window viewport-buffer t))))
                                                       (with-current-buffer viewport-buffer
                                                         (agent-shell-viewport--update-header)))))
                                       :client-maker (map-elt config :client-maker)
