@@ -7422,7 +7422,7 @@ Uses AGENT-CWD to shorten file paths where necessary."
                                             (max-preview-lines 5))
                                         (if (= (count-lines char-start char-end) 1)
                                             ;; Same line region? Avoid numbering.
-                                            (buffer-substring char-start char-end)
+                                            (buffer-substring-no-properties char-start char-end)
                                           (agent-shell--get-numbered-region
                                            :buffer buffer
                                            :from char-start
@@ -7456,7 +7456,7 @@ If CAP is non-nil, truncate at CAP."
         (goto-char (point-min))
         (forward-line (1- start-line))
         (while (<= current-line end-line)
-          (let ((line-content (buffer-substring
+          (let ((line-content (buffer-substring-no-properties
                                (line-beginning-position)
                                (line-end-position))))
             (push (format "   %d: %s" current-line line-content)
