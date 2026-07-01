@@ -894,6 +894,15 @@ OUTGOING-REQUEST-DECORATOR (passed through to `acp-make-client')."
 (defvar-local agent-shell--transcript-file nil
   "Path to the shell's transcript file.")
 
+(defvar-local agent-shell--seen-message-chunks nil
+  "List of (messageId . content) cons cells seen in the current response, for dedup.")
+
+(defvar-local agent-shell--current-message-id nil
+  "The messageId of the response currently being streamed.")
+
+(defvar-local agent-shell--delta-text ""
+  "Accumulated text of no-messageId agent_message_chunk deltas within the current group.")
+
 (defun agent-shell--cleanup-default-directory ()
   "Delete the current buffer's `default-directory'.
 Only attach this to shells created by `agent-shell-new-temp-shell',
@@ -1931,25 +1940,49 @@ pretty-printed JSON inside a json fence."
              (agent-shell--append-transcript
               :text (format "\n## Agent (%s)\n\n" (format-time-string "%F %T"))
               :file-path agent-shell--transcript-file))
-           ;; Indent markdown headers in LLM output so they nest
-           ;; below the transcript's ## section headers.  Applied
-           ;; per-chunk: if a header is split across chunks it may
-           ;; not be indented (graceful degradation).
-           (let ((content (agent-shell--content-block-to-markdown
-                           (map-nested-elt acp-notification '(params update content)))))
-             (agent-shell--append-transcript
-              :text (agent-shell--indent-markdown-headers content)
-              :file-path agent-shell--transcript-file)
-             (agent-shell--update-fragment
-              :state state
-              :block-id (format "%s-agent_message_chunk"
-                                (map-elt state :chunked-group-count))
-              :body content
-              :create-new (not (equal (map-elt state :last-entry-type)
-                                      "agent_message_chunk"))
-              :append t
-              :navigation 'never
-              :render-body-images t))
+           (let* ((message-id (map-nested-elt acp-notification '(params update messageId)))
+                  (content (agent-shell--content-block-to-markdown
+                            (map-nested-elt acp-notification '(params update content)))))
+             ;; Reset per-response dedup state when a new messageId is first seen.
+             ;; Bounds seen-chunks to a single agent response regardless of session length.
+             (when (and message-id
+                        (not (equal message-id agent-shell--current-message-id)))
+               (setq agent-shell--current-message-id message-id)
+               (setq agent-shell--seen-message-chunks nil)
+               (setq agent-shell--delta-text ""))
+             (let* (;; Pattern A: a final chunk with messageId whose text is a suffix of (or
+                    ;; equal to) the accumulated no-messageId deltas.  Some ACP adapters send
+                    ;; one or more streaming deltas then a complete authoritative chunk.
+                    (is-delta-duplicate (and message-id
+                                             (not (string-empty-p agent-shell--delta-text))
+                                             (string-suffix-p agent-shell--delta-text content)))
+                    ;; Pattern B: same (messageId . content) pair seen before — batch flush
+                    ;; followed by individual re-delivery of each chunk.
+                    (seen-key (and message-id (cons message-id content)))
+                    (is-seen-duplicate (and seen-key
+                                           (member seen-key agent-shell--seen-message-chunks)))
+                    (is-duplicate (or is-delta-duplicate is-seen-duplicate)))
+             (cond
+              ((and message-id (not is-duplicate))
+               (setq agent-shell--seen-message-chunks
+                     (cons seen-key agent-shell--seen-message-chunks)))
+              ((not message-id)
+               (setq agent-shell--delta-text
+                     (concat agent-shell--delta-text content))))
+             (unless is-duplicate
+               (agent-shell--append-transcript
+                :text (agent-shell--indent-markdown-headers content)
+                :file-path agent-shell--transcript-file)
+               (agent-shell--update-fragment
+                :state state
+                :block-id (format "%s-agent_message_chunk"
+                                  (map-elt state :chunked-group-count))
+                :body content
+                :create-new (not (equal (map-elt state :last-entry-type)
+                                        "agent_message_chunk"))
+                :append t
+                :navigation 'never
+                :render-body-images t))))
            (map-put! state :last-entry-type "agent_message_chunk"))
           ((equal (map-nested-elt acp-notification '(params update sessionUpdate)) "user_message_chunk")
            ;; Only handle user_message_chunks when there's an active session/load
