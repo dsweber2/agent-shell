@@ -118,13 +118,9 @@ For Goose CLI, install [[https://block.github.io/goose/docs/getting-started/inst
 
 *** Cursor
 
-For Cursor agent, install with:
+For Cursor agent, install the official [[https://cursor.com/docs/cli][Cursor CLI]] and ensure the =agent= executable is in PATH. =agent-shell= uses its official ACP server (=agent acp=).
 
-#+begin_src bash
-npm install -g @blowmage/cursor-agent-acp
-#+end_src
-
-See https://github.com/blowmage/cursor-agent-acp-npm for details.
+A recent Cursor CLI is required (the =acp= subcommand was added in 2026). Older CLIs won't expose =agent acp=.
 
 *** Kimi Code CLI
 
@@ -454,6 +450,44 @@ For OAuth login-based authentication:
 #+begin_src emacs-lisp
 (setq agent-shell-qwen-authentication
       (agent-shell-qwen-make-authentication :login t))
+#+end_src
+
+*** Cursor
+
+By default authentication is handled externally: run =agent login= once outside Emacs and agent-shell uses that existing login (it sends no ACP authenticate request). This needs no configuration.
+
+Optionally, have agent-shell drive login-based authentication (=cursor_login=):
+
+#+begin_src emacs-lisp
+(setq agent-shell-cursor-authentication
+      (agent-shell-cursor-make-authentication :login t))
+#+end_src
+
+For API key authentication (passed via the =CURSOR_API_KEY= environment variable):
+
+#+begin_src emacs-lisp
+;; With string
+(setq agent-shell-cursor-authentication
+      (agent-shell-cursor-make-authentication :api-key "your-cursor-api-key-here"))
+
+;; With function
+(setq agent-shell-cursor-authentication
+      (agent-shell-cursor-make-authentication
+       :api-key (lambda () (auth-source-pass-get 'secret "cursor-api-key"))))
+#+end_src
+
+For auth token authentication (passed via the =CURSOR_AUTH_TOKEN= environment variable):
+
+#+begin_src emacs-lisp
+(setq agent-shell-cursor-authentication
+      (agent-shell-cursor-make-authentication :auth-token "your-cursor-auth-token"))
+#+end_src
+
+For no authentication (already authenticated externally):
+
+#+begin_src emacs-lisp
+(setq agent-shell-cursor-authentication
+      (agent-shell-cursor-make-authentication :none t))
 #+end_src
 
 *** Auggie
