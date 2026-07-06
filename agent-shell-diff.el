@@ -53,7 +53,7 @@ on-exit callback from running when the buffer is killed.")
     (define-key map (kbd "p") #'diff-hunk-prev)
     (define-key map (kbd "y") #'agent-shell-diff-accept-all)
     (define-key map (kbd "C-c C-c") #'agent-shell-diff-reject-all)
-    (define-key map (kbd "f") #'agent-shell-diff-open-file)
+    (define-key map (kbd "RET") #'agent-shell-diff-open-file)
     (define-key map (kbd "q") #'kill-current-buffer)
     map)
   "Keymap for `agent-shell-diff-mode'.")
@@ -200,7 +200,7 @@ Arguments:
                     "\\[diff-hunk-prev] previous hunk  "
                     "\\[agent-shell-diff-accept-all] accept  "
                     "\\[agent-shell-diff-reject-all] reject  "
-                    "\\[agent-shell-diff-open-file] open  "
+                    "\\[agent-shell-diff-open-file] open file  "
                     "\\[kill-current-buffer] quit"))))
           diff-buffer)
       (pop-to-buffer diff-buffer '((display-buffer-use-some-window
