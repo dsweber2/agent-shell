@@ -234,6 +234,23 @@ If you are behind a network proxy, ~ollama pull~ will timeout. You then need to 
 
 See https://ollama.com/ for details
 
+*** Letta Code
+
+For [[https://docs.letta.com/letta-agent][Letta Code]] (stateful agents with long-term memory), install the [[https://tangled.org/codeluggage.tngl.sh/letta-code-acp][letta-code-acp]] adapter:
+#+begin_src bash
+npm install letta-code-acp
+#+end_src
+Or from source
+#+begin_src bash
+git clone https://tangled.org/codeluggage.tngl.sh/letta-code-acp
+cd letta-code-acp
+npm install && npm run build
+#+end_src
+
+You also need the ~letta~ CLI on your ~$PATH~. See [[https://docs.letta.com/letta-agent/quickstart][letta-ai/letta-code]] for install instructions.
+
+Authentication uses either a Letta Cloud API key (~LETTA_API_KEY~) or a connected local provider (~letta connect <provider>~ run once outside Emacs).
+
 ** Installation
 
 =agent-shell= is powered by built-in =comint-shell=, via [[https://github.com/xenodium/shell-maker][shell-maker]], available on [[https://melpa.org/#/shell-maker][MELPA]].
@@ -575,6 +592,52 @@ and a dummy auth file ~/.local/share/opencode/auth.json~
 
 Huge thanks for /gdindi/ for finding and and describing this in https://github.com/xenodium/agent-shell/issues/526
 
+*** Letta Code
+
+Letta agents are stateful — they persist long-term memory across sessions and conversations. Configuration is driven entirely through environment variables set on ~agent-shell-letta-environment~; the adapter reads them at process start.
+
+If you built ~letta-code-acp~ from source (see [[*Letta Code][External dependencies → Letta Code]]), point ~agent-shell-letta-acp-command~ at the local binary. Use ~expand-file-name~ — tilde won't expand inside a process command list:
+
+#+begin_src emacs-lisp
+(setq agent-shell-letta-acp-command
+      (list (expand-file-name "~/path/to/letta-code-acp/bin/letta-code-acp")))
+#+end_src
+
+Then configure the adapter environment. Common variables:
+
+- ~LETTA_API_KEY~ — Letta Cloud credentials (omit for a connected local provider).
+- ~LETTA_AGENT_ID~ — pin all shells to a specific agent (~agent-...~).
+- ~LETTA_MODEL~ — model handle (e.g. ~auto~).
+- ~LETTA_PERMISSION_MODE~ — one of ~standard~, ~accept-edits~, ~bypass-permissions~.
+
+For Letta Cloud, load ~LETTA_API_KEY~ from a ~.env~ file and inherit shell ~PATH~ so ~letta~ resolves:
+
+#+begin_src emacs-lisp
+(setq agent-shell-letta-environment
+      (agent-shell-make-environment-variables
+       :inherit-env t
+       :load-env (expand-file-name "~/path/to/letta-code-acp/.env")
+       "LETTA_AGENT_ID" "agent-..."
+       "LETTA_MODEL" "auto"
+       "LETTA_PERMISSION_MODE" "standard"))
+#+end_src
+
+For a local Letta backend (no cloud key), just inherit the environment:
+
+#+begin_src emacs-lisp
+(setq agent-shell-letta-environment
+      (agent-shell-make-environment-variables
+       :inherit-env t
+       "LETTA_AGENT_ID" "agent-local-..."
+       "LETTA_MODEL" "auto"
+       "LETTA_PERMISSION_MODE" "standard"))
+#+end_src
+
+Because Letta agents are stateful, ~agent-shell-letta.el~ provides two entry points beyond the standard ~agent-shell-letta-start-agent~:
+
+- =M-x agent-shell-letta-start-main-chat= — attach to the agent's persistent top-level conversation (renameable, not deletable). Multiple shells opened with this command share the same conversation and memory.
+- =M-x agent-shell-letta-start-conversation= — spawn a fresh, isolated conversation under the same agent (separate history, still shares agent-level memory).
+
 *** Customizing Available Agents
 
 By default, =agent-shell= includes configurations for all supported agents (Claude Agent, Gemini CLI, Codex, Goose, Cursor, CodeBuddy, Qwen Code, and Auggie). You can customize which agents are available through the =agent-shell-agent-configs= variable.
@@ -603,6 +666,9 @@ Start a specific agent shell session directly:
 - =M-x agent-shell-qwen-start= - Start a Qwen Code agent session
 - =M-x agent-shell-droid-start-agent= - Start a Factory Droid agent session
 - =M-x agent-shell-pi-start-agent= - Start a Pi coding agent session
+- =M-x agent-shell-letta-start-agent= - Start a Letta Code agent session
+- =M-x agent-shell-letta-start-main-chat= - Attach to the Letta agent's persistent main chat
+- =M-x agent-shell-letta-start-conversation= - Spawn a fresh Letta Code conversation
 
 *** Setting a default agent for all new shells
 
