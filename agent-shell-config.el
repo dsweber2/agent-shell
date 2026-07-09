@@ -36,6 +36,7 @@
 (require 'cl-lib)
 (require 'map)
 (require 'seq)
+(require 'agent-shell-faces)
 
 ;;; Normalization
 
@@ -119,18 +120,29 @@ For example:
             (agent-shell--config-options state)))
 
 (defun agent-shell--config-option-by-category (state category)
-  "Return first config option in STATE matching CATEGORY, or nil.
+  "Return a config option in STATE matching CATEGORY, or nil.
 
 CATEGORY may be nil for uncategorized options.  Uses `equal' for
 nil-safe comparison.
+
+When several options share CATEGORY, prefers the one whose `:id'
+equals CATEGORY, falling back to the first match.  Some agents (e.g.
+Cline) tag multiple options with the same category -- both their
+`provider' and `model' options use category \"model\" -- so matching
+on category alone could otherwise resolve \"model\" to the provider
+option.
 
 For example:
 
   (agent-shell--config-option-by-category state \"model\")
   => \\='((:id . \"model\") (:category . \"model\") ...)"
-  (seq-find (lambda (option)
-              (equal category (map-elt option :category)))
-            (agent-shell--config-options state)))
+  (let ((matches (seq-filter (lambda (option)
+                               (equal category (map-elt option :category)))
+                             (agent-shell--config-options state))))
+    (or (seq-find (lambda (option)
+                    (equal category (map-elt option :id)))
+                  matches)
+        (car matches))))
 
 (defun agent-shell--select-config-options (state)
   "Return selectable (type = \"select\") config options from STATE."
@@ -223,7 +235,7 @@ https://agentclientprotocol.com/protocol/session-config-options"
 
 When a config option with category \"model\" exists, converts its
 values to legacy model shape.  Otherwise returns session :models."
-  (if-let ((model-option (agent-shell--config-option-by-category state "model")))
+  (if-let* ((model-option (agent-shell--config-option-by-category state "model")))
       (agent-shell--config-option-as-models model-option)
     (map-nested-elt state '(:session :models))))
 
@@ -248,15 +260,15 @@ name, id, current value, and optional description."
       (let ((name (propertize (format "%s (id: %s)"
                                       (map-elt option :name)
                                       (map-elt option :id))
-                              'font-lock-face 'font-lock-function-name-face))
+                              'font-lock-face 'agent-shell-list-name))
             (current (propertize (format "current: %s"
                                          (agent-shell--config-option-value-name
                                           option
                                           (map-elt option :current-value)))
-                                 'font-lock-face 'font-lock-constant-face))
+                                 'font-lock-face 'agent-shell-list-value))
             (desc (when (map-elt option :description)
                     (propertize (map-elt option :description)
-                                'font-lock-face 'font-lock-comment-face))))
+                                'font-lock-face 'agent-shell-list-description))))
         (string-join (delq nil (list name current desc)) "\n")))
     config-options)
    "\n\n"))

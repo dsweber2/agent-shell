@@ -214,6 +214,22 @@ streaming **not bold**" nil)))))
                   (agent-shell-markdown-convert "see ![alt](/no/such/file.png) end"))
                  '(("see ![alt](/no/such/file.png) end" nil)))))
 
+(ert-deftest agent-shell-markdown-convert-remote-image-falls-back-to-link ()
+  ;; A remote image that can't be shown inline (no cache configured, and a
+  ;; non-graphical display in batch) becomes a clickable link, not raw markup.
+  (should (equal (agent-shell-markdown--deconstruct
+                  (agent-shell-markdown-convert
+                   "see ![docs](https://example.com/a.png) end"))
+                 '(("see " nil)
+                   ("docs" (agent-shell-markdown-link))
+                   (" end" nil)))))
+
+(ert-deftest agent-shell-markdown-convert-remote-image-empty-alt-uses-url ()
+  ;; With no alt text, the link label is the URL itself.
+  (should (equal (agent-shell-markdown--deconstruct
+                  (agent-shell-markdown-convert "![](https://example.com/a.png)"))
+                 '(("https://example.com/a.png" (agent-shell-markdown-link))))))
+
 (ert-deftest agent-shell-markdown-convert-link-in-fenced-block-untouched ()
   ;; The `[b](v)' inside fences stays literal — it isn't re-processed
   ;; as a link.  Body chars carry the `agent-shell-markdown-frozen'
@@ -364,6 +380,20 @@ print(\"hi\")
     (should (eq t (get-text-property 2 'agent-shell-markdown-frozen s)))
     (should (eq t (get-text-property 13 'agent-shell-markdown-frozen s)))
     (should (null (get-text-property 0 'agent-shell-markdown-frozen s)))))
+
+(ert-deftest agent-shell-markdown-convert-rendered-text-marked-fontified ()
+  ;; Rendered chars carry `fontified t' so jit-lock never re-runs over
+  ;; them.  We style via `face'/`font-lock-face' text properties, not
+  ;; font-lock keywords, so a jit-lock pass applies nothing — but its
+  ;; firing mid-drag disturbs mouse drag-tracking and collapses the
+  ;; selection to empty, silently breaking mouse copy of rendered text.
+  ;; Marking `fontified t' up front prevents that pass entirely.
+  (let ((s (agent-shell-markdown-convert "hello **world**")))
+    (should (eq t (get-text-property 0 'fontified s)))
+    (should (eq t (get-text-property (1- (length s)) 'fontified s))))
+  ;; Also holds for fenced source blocks (the reported failure case).
+  (let ((s (agent-shell-markdown-convert "```\ncode\n```")))
+    (should (eq t (get-text-property 1 'fontified s)))))
 
 (ert-deftest agent-shell-markdown-source-block-streamed-in-chunks ()
   ;; Real-world LLM streaming: a fenced code block arrives in small
@@ -1269,6 +1299,514 @@ A " nil)
     (agent-shell-markdown-replace-markup :force t)
     (should-not (string-match-p "\\*\\*"
                                 (substring-no-properties (buffer-string))))))
+
+(ert-deftest agent-shell-markdown--url-copy-file-test ()
+  "Test `agent-shell-markdown--url-copy-file'.
+
+Synchronously downloads a URL to a file, validating HTTP 200 and an optional
+Content-Type prefix before writing.  `url-retrieve-synchronously' is stubbed
+so the test never touches the network."
+  (let* ((make-response
+          (lambda (status content-type body)
+            (lambda (&rest _)
+              (let ((buffer (generate-new-buffer " *fake-http*")))
+                (with-current-buffer buffer
+                  (set-buffer-multibyte nil)
+                  (insert (format "HTTP/1.1 %s\r\nContent-Type: %s\r\n\r\n"
+                                  status content-type))
+                  (insert body))
+                buffer))))
+         (dest (make-temp-file "agent-shell-url-copy")))
+    (unwind-protect
+        (progn
+          ;; 200 + matching Content-Type prefix -> writes body, returns dest.
+          (delete-file dest)
+          (cl-letf (((symbol-function 'url-retrieve-synchronously)
+                     (funcall make-response "200 OK" "image/png" "PNGBYTES")))
+            (should (equal (agent-shell-markdown--url-copy-file
+                            :url "https://example.com/a.png" :file dest
+                            :content-type-prefix "image/")
+                           dest))
+            (should (file-exists-p dest)))
+
+          ;; No Content-Type prefix -> any 200 response is written.
+          (delete-file dest)
+          (cl-letf (((symbol-function 'url-retrieve-synchronously)
+                     (funcall make-response "200 OK" "text/plain" "hello")))
+            (should (equal (agent-shell-markdown--url-copy-file
+                            :url "https://example.com/a" :file dest)
+                           dest))
+            (should (file-exists-p dest)))
+
+          ;; 200 but Content-Type prefix mismatch -> nil, nothing written.
+          (delete-file dest)
+          (cl-letf (((symbol-function 'url-retrieve-synchronously)
+                     (funcall make-response "200 OK" "text/html" "<html>nope</html>")))
+            (should-not (agent-shell-markdown--url-copy-file
+                         :url "https://example.com/a" :file dest
+                         :content-type-prefix "image/"))
+            (should-not (file-exists-p dest)))
+
+          ;; Non-200 -> nil, nothing written.
+          (cl-letf (((symbol-function 'url-retrieve-synchronously)
+                     (funcall make-response "404 Not Found" "image/png" "x")))
+            (should-not (agent-shell-markdown--url-copy-file
+                         :url "https://example.com/a.png" :file dest
+                         :content-type-prefix "image/"))
+            (should-not (file-exists-p dest)))
+
+          ;; Connection failure (nil buffer) -> nil, nothing written.
+          (cl-letf (((symbol-function 'url-retrieve-synchronously)
+                     (lambda (&rest _) nil)))
+            (should-not (agent-shell-markdown--url-copy-file
+                         :url "https://example.com/a.png" :file dest))
+            (should-not (file-exists-p dest))))
+      (when (file-exists-p dest) (delete-file dest)))))
+
+(ert-deftest agent-shell-markdown--fetch-remote-image-test ()
+  "Test `agent-shell-markdown--fetch-remote-image'.
+
+Owns the image policy (http-only, known image extension, md5-named cache);
+the download itself is delegated to `agent-shell-markdown--url-copy-file',
+which is stubbed here so the test exercises only the policy."
+  ;; With a CACHE-DIRECTORY: cached path requested from the downloader and
+  ;; returned, under that directory.
+  (cl-letf (((symbol-function 'agent-shell-markdown--url-copy-file)
+             (lambda (&rest args) (plist-get args :file))))
+    (let ((file (agent-shell-markdown--fetch-remote-image
+                 "https://example.com/a.png" "/tmp/img-cache")))
+      (should (string-prefix-p "/tmp/img-cache/" file))
+      (should (string-suffix-p ".png" file))
+      (should (string-match-p "/[0-9a-f]+\\.png\\'" file))))
+
+  ;; Without a CACHE-DIRECTORY: remote images are not fetched.
+  (cl-letf (((symbol-function 'agent-shell-markdown--url-copy-file)
+             (lambda (&rest _) (error "should not download"))))
+    (should-not (agent-shell-markdown--fetch-remote-image "https://example.com/a.png" nil)))
+
+  ;; A failed download -> nil (no silent path returned).
+  (cl-letf (((symbol-function 'agent-shell-markdown--url-copy-file)
+             (lambda (&rest _) nil)))
+    (should-not (agent-shell-markdown--fetch-remote-image "https://example.com/b.png" "/tmp/img-cache")))
+
+  ;; Non-http uris and extensionless urls are never downloaded.
+  (cl-letf (((symbol-function 'agent-shell-markdown--url-copy-file)
+             (lambda (&rest _) (error "should not download"))))
+    (should-not (agent-shell-markdown--fetch-remote-image "file:///tmp/x.png" "/tmp/img-cache"))
+    (should-not (agent-shell-markdown--fetch-remote-image "https://example.com/img?id=1" "/tmp/img-cache"))))
+
+(ert-deftest agent-shell-markdown--resolve-image-url-remote-test ()
+  "Test that `agent-shell-markdown--resolve-image-url' fetches http(s) urls.
+
+A remote url is resolved through `agent-shell-markdown--fetch-remote-image'
+\(stubbed), forwarding the injected cache directory; local-path resolution is
+unaffected."
+  (cl-letf (((symbol-function 'agent-shell-markdown--fetch-remote-image)
+             (lambda (url image-cache-directory)
+               (and (string-match-p "\\`https?://" url) image-cache-directory
+                    (format "%s/x.png" image-cache-directory)))))
+    ;; Remote url -> fetched; the image-cache-directory argument is forwarded.
+    (should (equal (agent-shell-markdown--resolve-image-url
+                    "https://example.com/x.png" "/injected")
+                   "/injected/x.png"))
+    ;; No image-cache-directory -> remote image is not fetched (nil).
+    (should-not (agent-shell-markdown--resolve-image-url "https://example.com/x.png"))
+    ;; A non-existent local path still resolves to nil (no fetch attempted).
+    (should-not (agent-shell-markdown--resolve-image-url "/no/such/file.png"))))
+
+(ert-deftest agent-shell-markdown--open-externally-test ()
+  "Test `agent-shell-markdown--open-externally' gates on confirmation."
+  (let ((opened nil))
+    (cl-letf (((symbol-function 'shell-command-do-open)
+               (lambda (files) (setq opened files)))
+              ((symbol-function 'browse-url-of-file)
+               (lambda (file) (setq opened (list file)))))
+      ;; Confirmed -> opens.
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+        (setq opened nil)
+        (agent-shell-markdown--open-externally "/tmp/x.bin")
+        (should (equal opened '("/tmp/x.bin"))))
+      ;; Declined -> does nothing.
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) nil)))
+        (setq opened nil)
+        (agent-shell-markdown--open-externally "/tmp/x.bin")
+        (should-not opened)))))
+
+(ert-deftest agent-shell-markdown--binary-file-p-test ()
+  "Test `agent-shell-markdown--binary-file-p' NUL-byte heuristic."
+  (let ((text (make-temp-file "agent-shell-text"))
+        (binary (make-temp-file "agent-shell-binary")))
+    (unwind-protect
+        (progn
+          (with-temp-file text (insert "plain text\nmore"))
+          (let ((coding-system-for-write 'binary))
+            (with-temp-file binary (insert "abc\0def")))
+          (should-not (agent-shell-markdown--binary-file-p text))
+          (should (agent-shell-markdown--binary-file-p binary)))
+      (delete-file text)
+      (delete-file binary))))
+
+(ert-deftest agent-shell-markdown--open-local-link-binary-vs-text-test ()
+  "Test `agent-shell-markdown--open-local-link' routes by file type.
+Text/navigable files open in Emacs; binary files open externally."
+  (let ((text (make-temp-file "agent-shell-ol-text" nil ".txt"))
+        (binary (make-temp-file "agent-shell-ol-bin" nil ".bin"))
+        (action nil))
+    (unwind-protect
+        (progn
+          (with-temp-file text (insert "hello"))
+          (let ((coding-system-for-write 'binary))
+            (with-temp-file binary (insert "x\0y")))
+          (cl-letf (((symbol-function 'find-file)
+                     (lambda (f) (setq action (cons 'find-file f))))
+                    ((symbol-function 'agent-shell-markdown--open-externally)
+                     (lambda (f) (setq action (cons 'external f)))))
+            ;; Text file -> find-file (navigable in Emacs).
+            (setq action nil)
+            (should (agent-shell-markdown--open-local-link (concat "file://" text)))
+            (should (equal action (cons 'find-file text)))
+            ;; Binary file -> open externally.
+            (setq action nil)
+            (should (agent-shell-markdown--open-local-link (concat "file://" binary)))
+            (should (equal action (cons 'external binary)))
+            ;; Binary file with a line number -> still external (line ignored).
+            (setq action nil)
+            (should (agent-shell-markdown--open-local-link (concat "file://" binary "#L10")))
+            (should (equal action (cons 'external binary)))))
+      (delete-file text)
+      (delete-file binary))))
+
+(defun agent-shell-markdown-tests--source-blocks (markdown)
+  "Return the `:source-blocks' descriptors a renderer sees for MARKDOWN.
+Each :block marker range is replaced by the text it spans, so the
+result is stable to compare against.  (The marker behaviour itself is
+exercised by the editing in the -all-math-cases test.)"
+  (let (blocks)
+    (with-temp-buffer
+      (let ((agent-shell-markdown-render-functions
+             (list (lambda (context)
+                     (setq blocks
+                           (mapcar (lambda (b)
+                                     (list (cons :language (map-elt b :language))
+                                           (cons :block (buffer-substring-no-properties
+                                                         (map-nested-elt b '(:block :start))
+                                                         (map-nested-elt b '(:block :end))))
+                                           (cons :body (map-elt b :body))
+                                           (cons :complete (map-elt b :complete))))
+                                   (map-elt context :source-blocks)))
+                     nil))))
+        (insert markdown)
+        (agent-shell-markdown-replace-markup)))
+    blocks))
+
+(ert-deftest agent-shell-markdown-render-functions-receives-source-blocks ()
+  ;; A render function is handed `:source-blocks' descriptors: the language,
+  ;; the block's marker range (shown here as the text it spans), the body,
+  ;; and completeness.
+  (should (equal (agent-shell-markdown-tests--source-blocks
+                  "text
+```math
+\\frac{a}{b}
+```
+")
+                 '(((:language . "math")
+                    (:block . "```math\n\\frac{a}{b}\n```\n")
+                    (:body . "\\frac{a}{b}")
+                    (:complete . t))))))
+
+(ert-deftest agent-shell-markdown-render-functions-source-blocks-incomplete ()
+  ;; A still-streaming fence is reported with `:complete' nil and no
+  ;; `:body', so a renderer knows the language but not to claim it yet.
+  (should (equal (agent-shell-markdown-tests--source-blocks
+                  "```math
+\\frac{a}{b")
+                 '(((:language . "math")
+                    (:block . "```math\n\\frac{a}{b")
+                    (:body . nil)
+                    (:complete . nil))))))
+
+(ert-deftest agent-shell-markdown-render-functions-frozen-region-protected ()
+  ;; A render function that tags its region `agent-shell-markdown-frozen'
+  ;; has it treated as an avoid-range: the emphasis passes leave `_'/`*'
+  ;; inside literal, while markup outside the region still renders.
+  (with-temp-buffer
+    (let ((agent-shell-markdown-render-functions
+           (list (lambda (_context)
+                   (goto-char (point-min))
+                   (when (re-search-forward "\\$\\$.*?\\$\\$" nil t)
+                     (put-text-property (match-beginning 0) (match-end 0)
+                                        'agent-shell-markdown-frozen t))
+                   nil))))
+      (insert "see **bold** and $$a_b*c*$$ end")
+      (agent-shell-markdown-replace-markup)
+      (should (equal (agent-shell-markdown--deconstruct (buffer-string))
+                     '(("see " nil)
+                       ("bold" (agent-shell-markdown-bold))
+                       (" and $$a_b*c*$$ end" nil)))))))
+
+(ert-deftest agent-shell-markdown-render-functions-frozen-fenced-block-left-intact ()
+  ;; A render function can claim a ```math / ```latex fence in place
+  ;; (freezing the whole block without deleting its fences), and
+  ;; `--style-source-blocks' honors `agent-shell-markdown-frozen' and
+  ;; leaves it untouched.  Without this the source-block pass would strip
+  ;; the fences and re-fontify the body as a code panel, clobbering the
+  ;; renderer's overlay and forcing it to mutate the agent's original text.
+  (with-temp-buffer
+    (let ((agent-shell-markdown-render-functions
+           (list (lambda (context)
+                   (dolist (block (map-elt context :source-blocks))
+                     (when (and (equal (map-elt block :language) "math")
+                                (map-elt block :complete))
+                       (put-text-property (map-nested-elt block '(:block :start))
+                                          (map-nested-elt block '(:block :end))
+                                          'agent-shell-markdown-frozen t)))
+                   nil))))
+      (insert "```math\n\\frac{a}{b}\n```\n")
+      (agent-shell-markdown-replace-markup)
+      ;; Fences and body survive verbatim: no code-panel "⧉" label was
+      ;; inserted and the frozen claim still stands for later passes.
+      (should (equal (substring-no-properties (buffer-string))
+                     "```math\n\\frac{a}{b}\n```\n"))
+      (should-not (string-match-p "⧉" (buffer-string)))
+      (should (eq t (get-text-property (point-min)
+                                       'agent-shell-markdown-frozen))))))
+
+(ert-deftest agent-shell-markdown-render-functions-watermark-held-back ()
+  ;; A render function returning `:watermark' holds the streaming frontier
+  ;; behind its own open delimiter, even when it spans lines above the last
+  ;; one (which the built-in start-of-last-line back-off wouldn't cover).
+  (with-temp-buffer
+    (let ((agent-shell-markdown-render-functions
+           (list (lambda (_context)
+                   (save-excursion
+                     (goto-char (point-min))
+                     (when (re-search-forward "\\$\\$" nil t)
+                       (list (cons :watermark (match-beginning 0)))))))))
+      (insert "intro\n$$\nx_y\nz_w")
+      (let ((open-dollar (save-excursion
+                           (goto-char (point-min))
+                           (re-search-forward "\\$\\$")
+                           (match-beginning 0))))
+        (agent-shell-markdown-replace-markup)
+        (should (= (get-text-property (point-min)
+                                      'agent-shell-markdown-watermark)
+                   open-dollar))))))
+
+(ert-deftest agent-shell-markdown-render-functions-all-math-cases ()
+  ;; A renderer that claims every math form the PR supports and wraps its
+  ;; LaTeX in brackets: inline \(..\) as [..], and block \[..\], $$..$$ and
+  ;; fenced ```math / ```latex as the multi-line [\n..\n].  It routes the
+  ;; fenced blocks by `:language', keeps $$ inside a fenced code block
+  ;; literal, and uses `:inline-code-ranges' to keep a \(..\) inside an
+  ;; inline `code` span literal too.
+  (with-temp-buffer
+    (let ((agent-shell-markdown-render-functions
+           (list
+            (lambda (context)
+              ;; Fenced ```math / ```latex blocks, claimed by language.
+              ;; Back-to-front so replacing one block does not disturb the
+              ;; markers of an adjacent earlier one.
+              (dolist (block (reverse (map-elt context :source-blocks)))
+                (when (and (member (map-elt block :language) '("math" "latex"))
+                           (map-elt block :complete))
+                  (let ((start (map-nested-elt block '(:block :start)))
+                        (end (map-nested-elt block '(:block :end)))
+                        (body (map-elt block :body)))
+                    (delete-region start end)
+                    (goto-char start)
+                    (insert (format "[\n%s\n]\n\n" body))
+                    (put-text-property start (point)
+                                       'agent-shell-markdown-frozen t))))
+              ;; Inline / block delimiters, skipping matches that fall
+              ;; inside code: a non-math fenced block (so $$ in code stays
+              ;; literal) or an inline `code` span from
+              ;; `:inline-code-ranges' (so a literal \(..\) the agent meant
+              ;; as code stays literal).
+              (let ((code-ranges
+                     (append
+                      (map-elt context :inline-code-ranges)
+                      (seq-keep
+                       (lambda (b)
+                         (unless (member (map-elt b :language) '("math" "latex"))
+                           (cons (map-nested-elt b '(:block :start))
+                                 (map-nested-elt b '(:block :end)))))
+                       (map-elt context :source-blocks)))))
+                (dolist (spec (list (list (rx "\\(" (group (*? anychar)) "\\)") "[%s]")
+                                    (list (rx "\\[" (group (*? anychar)) "\\]") "[\n%s\n]\n")
+                                    (list (rx "$$" (group (*? anychar)) "$$") "[\n%s\n]\n")))
+                  (save-excursion
+                    (goto-char (point-min))
+                    (while (re-search-forward (car spec) nil t)
+                      (let ((start (match-beginning 0))
+                            (content (match-string 1)))
+                        (unless (or (get-text-property start 'agent-shell-markdown-frozen)
+                                    (seq-some (lambda (r) (and (>= start (car r))
+                                                              (< start (cdr r))))
+                                              code-ranges))
+                          (replace-match (format (cadr spec) content) nil t)
+                          (put-text-property start (point)
+                                             'agent-shell-markdown-frozen t)))))))
+              nil))))
+      (insert "```python
+q = \"$$not math$$\"
+```
+inline \\(a+b\\) here
+verbatim `\\(z\\)` code
+\\[x = y\\]
+$$E = mc^2$$
+```math
+\\frac{a}{b}
+```
+```latex
+\\alpha
+```
+")
+      (agent-shell-markdown-replace-markup)
+      ;; Every math form rendered with its LaTeX in brackets; the $$ inside
+      ;; the python block stayed literal (its language kept it out of
+      ;; reach), and the \(z\) inside the inline `code` span stayed literal
+      ;; too (`:inline-code-ranges' kept it out of reach).
+      (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                     "
+python ⧉
+
+q = \"$$not math$$\"
+
+inline [a+b] here
+verbatim \\(z\\) code
+[
+x = y
+]
+
+[
+E = mc^2
+]
+
+[
+\\frac{a}{b}
+]
+
+[
+\\alpha
+]
+
+")))))
+
+;;; Reconstructing markdown from rendered text (copy-as-markdown).
+
+(defun agent-shell-markdown-tests--roundtrip (markdown)
+  "Render MARKDOWN, then reconstruct it from the whole buffer.
+Returns the reconstructed markdown, which should equal MARKDOWN
+for a fully-selected buffer."
+  (with-temp-buffer
+    (insert markdown)
+    (agent-shell-markdown-replace-markup :force t :render-images nil)
+    (agent-shell-markdown-reconstruct (point-min) (point-max))))
+
+(ert-deftest agent-shell-markdown-reconstruct-inline ()
+  (should (equal (agent-shell-markdown-tests--roundtrip
+                  "Some **bold**, *italic*, `code` and a [link](https://x.com).\n")
+                 "Some **bold**, *italic*, `code` and a [link](https://x.com).\n")))
+
+(ert-deftest agent-shell-markdown-reconstruct-header ()
+  (should (equal (agent-shell-markdown-tests--roundtrip "## My title\n")
+                 "## My title\n")))
+
+(ert-deftest agent-shell-markdown-reconstruct-fenced-block ()
+  (should (equal (agent-shell-markdown-tests--roundtrip
+                  "```python\ndef foo():\n    return 1\n```\n")
+                 "```python\ndef foo():\n    return 1\n```\n")))
+
+(ert-deftest agent-shell-markdown-reconstruct-table ()
+  (should (equal (agent-shell-markdown-tests--roundtrip
+                  "| A | B |\n|---|---|\n| 1 | 2 |\n")
+                 "| A | B |\n|---|---|\n| 1 | 2 |\n")))
+
+(ert-deftest agent-shell-markdown-reconstruct-mixed ()
+  (let ((markdown (concat "# Title\n\n"
+                          "A **bold** paragraph.\n\n"
+                          "```js\nx = 1\n```\n\n"
+                          "> a quote\n\n"
+                          "- item *one*\n- item two\n")))
+    (should (equal (agent-shell-markdown-tests--roundtrip markdown) markdown))))
+
+(ert-deftest agent-shell-markdown-reconstruct-nested ()
+  ;; Nested and overlapping markup reconstructs faithfully, including
+  ;; the mirror cases (`**_x_**' vs `[**b**](u)') where two constructs
+  ;; land on the same characters.
+  (dolist (markdown '("This is **bold _and italic_ inside**."
+                      "**_x_**"
+                      "a link with [**bold** text](https://x.com) inside"
+                      "**bold `code` and _italic_ end**"
+                      "## A **big** title\n"))
+    (should (equal (agent-shell-markdown-tests--roundtrip markdown) markdown))))
+
+(ert-deftest agent-shell-markdown-reconstruct-partial-selection-is-verbatim ()
+  ;; A construct only partially covered by the region is copied as shown
+  ;; (visible text), not reconstructed to its source.
+  (with-temp-buffer
+    (insert "Some **bold text** here.\n")
+    (agent-shell-markdown-replace-markup :force t :render-images nil)
+    ;; Rendered buffer is "Some bold text here.\n"; selecting from the
+    ;; middle of the span through the end must not restore any `**'.
+    (should (equal (agent-shell-markdown-reconstruct
+                    (+ (point-min) 7) (point-max))
+                   "ld text here.\n"))))
+
+(ert-deftest agent-shell-markdown-reconstruct-across-streaming ()
+  ;; Markup split unclosed across two render passes still reconstructs.
+  (with-temp-buffer
+    (insert "A **para")
+    (agent-shell-markdown-replace-markup :render-images nil)
+    (goto-char (point-max))
+    (insert "graph** here.\n\nsecond line.\n")
+    (agent-shell-markdown-replace-markup :render-images nil)
+    (should (equal (agent-shell-markdown-reconstruct
+                    (point-min) (point-max))
+                   "A **paragraph** here.\n\nsecond line.\n"))))
+
+;;; Exposing rendered link URLs (issue #669).
+
+(ert-deftest agent-shell-markdown-link-exposes-url ()
+  (with-temp-buffer
+    (insert "see [docs](https://example.com) ok")
+    (agent-shell-markdown-replace-markup :force t :render-images nil)
+    ;; Markup is replaced with the visible title.
+    (should (equal (buffer-string) "see docs ok"))
+    (goto-char (point-min))
+    (search-forward "docs")
+    (let ((on-link (1- (point))))
+      ;; The URL is recoverable from a text property on the title.
+      (should (equal (agent-shell-markdown-link-url-at-point on-link)
+                     "https://example.com"))
+      ;; Click behaviour is preserved (keymap still on the title).
+      (should (get-text-property on-link 'keymap)))
+    ;; Off the link there is no URL.
+    (should-not (agent-shell-markdown-link-url-at-point (point-min)))))
+
+(ert-deftest agent-shell-markdown-link-url-at-point-defaults-to-point ()
+  (with-temp-buffer
+    (insert "[docs](https://example.com)")
+    (agent-shell-markdown-replace-markup :force t :render-images nil)
+    (goto-char (1+ (point-min)))
+    (should (equal (agent-shell-markdown-link-url-at-point)
+                   "https://example.com"))))
+
+;;; Exposing rendered code block bodies at point.
+
+(ert-deftest agent-shell-markdown-source-block-at-point ()
+  (with-temp-buffer
+    (insert "```python\ndef foo():\n    return 1\n```\n")
+    (agent-shell-markdown-replace-markup :force t :render-images nil)
+    (goto-char (point-min))
+    (search-forward "def foo")
+    ;; Point on the body returns the code without fences or label.
+    (should (equal (agent-shell-markdown-source-block-at-point (1- (point)))
+                   "def foo():\n    return 1"))
+    ;; The language label above the body is not the body.
+    (goto-char (point-min))
+    (search-forward "⧉")
+    (should-not (agent-shell-markdown-source-block-at-point (1- (point))))))
 
 (provide 'agent-shell-markdown-tests)
 

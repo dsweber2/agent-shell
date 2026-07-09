@@ -33,6 +33,10 @@ With agent-shell, you can chat with the likes of Gemini CLI, Claude Agent, Auggi
 
 [[https://www.youtube.com/watch?v=HJQ86HuSIJI][https://img.youtube.com/vi/HJQ86HuSIJI/0.jpg]]
 
+[[https://www.youtube.com/watch?v=7fdHeUoRRgg][Bending Emacs Episode 14: Prototyping iOS apps with agent-shell, artist-mode, and Claude Skills - YouTube]]
+
+[[https://www.youtube.com/watch?v=7fdHeUoRRgg][https://img.youtube.com/vi/7fdHeUoRRgg/0.jpg]]
+
 * News
 
 Do take a look at all these blog posts as they showcase most =agent-shell= features.
@@ -68,8 +72,12 @@ We now have a handful of additional packages to extend the =agent-shell= experie
 - [[https://github.com/eddof13/ob-agent-shell][ob-agent-shell]]: Org Babel backend for executing =agent-shell= source blocks.
 - [[https://github.com/Marx-A00/agent-recall][agent-recall]]: Search, browse, and resume =agent-shell= conversation transcripts.
 - [[https://github.com/lgmoneda/agent-shell-pet][agent-shell-pet]]: Codex-like pets that broadcast agent-shell session states.
+- [[https://github.com/alberti42/agent-shell-math-renderer][agent-shell-math-renderer]]: Render LaTeX math equations as SVGs in =agent-shell=.
 - [[https://github.com/junyi-hou/agent-shell-tramp][agent-shell-tramp]]: Tramp integration for =agent-shell=.
 - [[https://github.com/nohzafk/agent-shell-hud][agent-shell-hud]]: Real-time =agent-shell= status overlay via a floating dashboard.
+- [[https://github.com/timfel/agent-shell-desktop.el][agent-shell-desktop]]: Desktop save mode integration for =agent-shell=. Saves and resumes shells by folder, config, and session id.
+- [[https://github.com/ultronozm/agent-shell-links.el][agent-shell-links.el]]: Bookmarks and Org links for =agent-shell= sessions.
+
 * Articles
 - 20Y: [[https://20y.hu/~slink/journal/agent-shell/index.html][Agentic development workflow in Emacs]]
 - Skye: [[https://skyefreeman.com/blog/2026/04/15/how-im-using-llms-with-emacs][How I'm using LLM's via Emacs]].
@@ -100,7 +108,7 @@ Optionally: You may also need [[https://code.claude.com/docs/en/overview][Claude
 
 *** Codex
 
-For OpenAI's Codex, install [[https://github.com/zed-industries/codex-acp][zed/codex-acp]] and ensure the `codex-acp` executable is in PATH.
+For OpenAI's Codex, install [[https://github.com/agentclientprotocol/codex-acp][@agentclientprotocol/codex-acp]] (=npm install -g @agentclientprotocol/codex-acp=) and ensure the =codex-acp= executable is in PATH.
 
 *** Gemini CLI
 
@@ -112,14 +120,9 @@ For Goose CLI, install [[https://block.github.io/goose/docs/getting-started/inst
 
 *** Cursor
 
-For Cursor agent, install with:
+For Cursor agent, install the official [[https://cursor.com/docs/cli][Cursor CLI]] and ensure the =agent= executable is in PATH. =agent-shell= uses its official ACP server (=agent acp=).
 
-#+begin_src bash
-npm install -g @blowmage/cursor-agent-acp
-#+end_src
-
-See https://github.com/blowmage/cursor-agent-acp-npm for details.
-
+A recent Cursor CLI is required (the =acp= subcommand was added in 2026). Older CLIs won't expose =agent acp=.
 
 *** Kimi Code CLI
 
@@ -200,6 +203,15 @@ npm install -g pi-acp
 #+end_src
 
 See https://github.com/svkozak/pi-acp for details.
+*** Oh My Pi (=omp=)
+
+For the =omp= agent, install with:
+
+#+begin_src bash
+bun install -g @oh-my-pi/pi-coding-agent
+#+end_src
+
+See https://github.com/can1357/oh-my-pi for details.
 
 *** Opencode + local ollama models
 
@@ -215,10 +227,10 @@ For local ollama models, sudo permission is needed to initialize ~ollama.service
 
 #+begin_src bash
 curl -fsSL https://ollama.com/install.sh | sh
-opencode pull qwen2.5:7b
+ollama pull qwen2.5:7b
 #+end_src
 
-If you are behind a network proxy, ~opencode pull~ will timeout. You then need to add proxy settings inside ~/etc/systemd/system/ollama.service~
+If you are behind a network proxy, ~ollama pull~ will timeout. You then need to add proxy settings inside ~/etc/systemd/system/ollama.service~
 
 See https://ollama.com/ for details
 
@@ -442,6 +454,44 @@ For OAuth login-based authentication:
       (agent-shell-qwen-make-authentication :login t))
 #+end_src
 
+*** Cursor
+
+By default authentication is handled externally: run =agent login= once outside Emacs and agent-shell uses that existing login (it sends no ACP authenticate request). This needs no configuration.
+
+Optionally, have agent-shell drive login-based authentication (=cursor_login=):
+
+#+begin_src emacs-lisp
+(setq agent-shell-cursor-authentication
+      (agent-shell-cursor-make-authentication :login t))
+#+end_src
+
+For API key authentication (passed via the =CURSOR_API_KEY= environment variable):
+
+#+begin_src emacs-lisp
+;; With string
+(setq agent-shell-cursor-authentication
+      (agent-shell-cursor-make-authentication :api-key "your-cursor-api-key-here"))
+
+;; With function
+(setq agent-shell-cursor-authentication
+      (agent-shell-cursor-make-authentication
+       :api-key (lambda () (auth-source-pass-get 'secret "cursor-api-key"))))
+#+end_src
+
+For auth token authentication (passed via the =CURSOR_AUTH_TOKEN= environment variable):
+
+#+begin_src emacs-lisp
+(setq agent-shell-cursor-authentication
+      (agent-shell-cursor-make-authentication :auth-token "your-cursor-auth-token"))
+#+end_src
+
+For no authentication (already authenticated externally):
+
+#+begin_src emacs-lisp
+(setq agent-shell-cursor-authentication
+      (agent-shell-cursor-make-authentication :none t))
+#+end_src
+
 *** Auggie
 
 For login-based authentication (default):
@@ -488,7 +538,7 @@ If ~opencode~ is not found by ~agent-shell~, you can add it to the search path
 
 To register the local Qwen2.5:7b model in opencode, two files needs to be edited:
 
-~./config/opencode/opencode.json~
+~/.config/opencode/opencode.json~
 #+BEGIN_SRC js
      {
          "$schema": "https://opencode.ai/config.json",
@@ -512,7 +562,7 @@ To register the local Qwen2.5:7b model in opencode, two files needs to be edited
      }
 #+END_SRC
 
-and a dummy auth file ~./local/share/opencode/auth.json~
+and a dummy auth file ~/.local/share/opencode/auth.json~
 
 #+begin_src js
 {
@@ -664,6 +714,16 @@ Some minor modes (for example, =aggressive-indent-mode=) can interfere with an a
 
 #+begin_src emacs-lisp
 (setopt agent-shell-write-inhibit-minor-modes '(aggressive-indent-mode))
+#+end_src
+
+*** Keeping the system awake during long turns
+
+Long agent turns can outlast the system idle-sleep timeout, suspending the machine (and the agent) before the turn completes. On Emacs 31.1 or later, =agent-shell-inhibit-system-sleep= (enabled by default) keeps the system awake for the duration of each turn and releases the block once the turn finishes, so the system is only kept awake while there is work in progress (the display is still allowed to blank). This relies on the built-in [[https://git.savannah.gnu.org/cgit/emacs.git/tree/lisp/system-sleep.el][=system-sleep=]] library and has no effect on earlier Emacs versions. It does not prevent "hard" sleep such as closing a laptop lid.
+
+To turn it off:
+
+#+begin_src emacs-lisp
+(setopt agent-shell-inhibit-system-sleep nil)
 #+end_src
 
 All of the above settings can be applied on a per-project basis using [[https://www.gnu.org/software/emacs/manual/html_node/emacs/Directory-Variables.html][directory-local variables]].
